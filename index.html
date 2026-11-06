@@ -2160,25 +2160,34 @@ window.SEED_ERRORS = [
     });
   }
 
-  function pickWords(n, tag) {
+  function pickWords(n, tag, exclude) {
     n = n || 4;
     var t = today();
-    var due = [], fresh = [], known = {};
+    var due = [], fresh = [], later = [], ex = {};
+    (exclude || []).forEach(function (id) { if (id) ex[id] = 1; });
     (window.CET4_WORDS || []).forEach(function (w) {
+      if (ex[w.id]) return;
       var r = state.srs[w.id];
-      if (r) {
-        known[w.id] = 1;
-        if (r.due <= t) due.push(w);
-      } else fresh.push(w);
+      if (!r) fresh.push(w);
+      else if (r.due <= t) due.push(w);
+      else later.push(w);
     });
-    due.sort(function (a, b) { return state.srs[a.id].due.localeCompare(state.srs[b.id].due); });
+    // 同优先级内按词形稳定排序，保证结果可复现，不会随机跳
+    due.sort(function (a, b) {
+      return state.srs[a.id].due.localeCompare(state.srs[b.id].due) || a.w.localeCompare(b.w);
+    });
+    // 全部学完、今天又都没到期时，退回「最早到期」那批做提前复习，避免整页空转
+    later.sort(function (a, b) {
+      return state.srs[a.id].due.localeCompare(state.srs[b.id].due) || a.w.localeCompare(b.w);
+    });
     var weak = weakTags().map(function (x) { return x.tag; });
     fresh.sort(function (a, b) {
       var sa = (a.tags || []).filter(function (x) { return weak.indexOf(x) >= 0; }).length;
       var sb = (b.tags || []).filter(function (x) { return weak.indexOf(x) >= 0; }).length;
-      return sb - sa;
+      return (sb - sa) || a.w.localeCompare(b.w);
     });
     var list = due.concat(fresh);
+    if (list.length < n) list = list.concat(later);
     if (tag) {
       var f = list.filter(function (w) { return (w.tags || []).indexOf(tag) >= 0; });
       if (f.length >= n) list = f;
@@ -3778,21 +3787,35 @@ window.SEED_ERRORS = [
       pageHead('单词背诵', '按 SM-2 遗忘曲线排程：到期的先复习，新词按弱项标签优先。翻面后选择记忆程度，系统会算出下次到期日。',
         btn('换一组', { act: 'new-deck', icon: 'i-refresh' }) + btn('去复习错词', { act: 'go', route: 'review', cls: 'ghost' })) +
       '<div class="word-layout"><div>' + body + '</div>' +
-      '<div class="card"><div class="card-h"><div><div class="card-t">' + icon('i-layers') + '本轮队列</div><div class="card-sub">' + d.words.length + ' 词 · 第 ' + Math.min(d.idx + 1, d.words.length) + ' 个</div></div></div>' +
+      '<div class="card"><div class="card-h"><div><div class="card-t">' + icon('i-layers') + '本轮队列</div><div class="card-sub">' + (d.round ? '第 ' + d.round + ' 组 · ' : '') + d.words.length + ' 词 · 第 ' + Math.min(d.idx + 1, d.words.length) + ' 个</div></div></div>' +
       '<div class="card-b" style="padding-top:8px"><div class="deck-meta mb8"><span>到期 ' + st.due + '</span><span>已学 ' + st.learned + '</span><span>正确率 ' + (st.answered ? st.accuracy + '%' : '—') + '</span></div>' +
       '<div class="word-list">' + (list || '<div class="empty">暂无</div>') + '</div></div>' +
       '<div class="card-f"><span class="tiny muted">点击单词可跳转</span></div></div></div>' +
       '<div class="note mt16">' + icon('i-bulb') + ' SRS 规则：<b>again</b> 今天再来；<b>hard</b> 间隔 ×1.2；<b>good</b> 按易度系数放大；<b>easy</b> 额外 ×1.35。所有进度写在 localStorage，刷新不丢。</div>' +
       '</div>';
   }
+  var deckSeen = [];   // 本次会话已经发过的词 id：保证「换一组」每次都是新的一批
   function newDeck() {
-    return { words: E.pickWords(8), idx: 0, flipped: false, results: [], start: Date.now() };
+    var N = 8;
+    var cur = (ui.deck && ui.deck.words) ? ui.deck.words.map(function (w) { return w.id; }) : [];
+    var words = E.pickWords(N, null, deckSeen);
+    if (words.length < N) {
+      // 词库轮完了：只排除当前这一组，从剩下的词里重新取，保证点了一定有变化
+      deckSeen = cur.slice();
+      words = E.pickWords(N, null, deckSeen);
+    }
+    deckSeen = deckSeen.concat(words.map(function (w) { return w.id; }));
+    return {
+      words: words, idx: 0, flipped: false, results: [], start: Date.now(),
+      round: (ui.deck && ui.deck.round ? ui.deck.round : 0) + 1
+    };
   }
   function wordCard(d) {
     var w = d.words[d.idx];
-    var due = S.srs[w.id] ? '复习' : '新词';
+    var rec = S.srs[w.id];
+    var due = !rec ? '新词' : (rec.due <= E.today() ? '复习' : '提前复习');
     return '<div class="flash-wrap"><div class="flash' + (d.flipped ? ' flipped' : '') + '" data-act="flip" tabindex="0" role="button" aria-label="翻转单词卡">' +
-      '<div class="face front"><div class="tag-row">' + tag(due, due === '新词' ? 'gold' : 'jade') + (w.tags || []).slice(0, 2).map(function (t) { return tag(t, 'line'); }).join('') + '</div>' +
+      '<div class="face front"><div class="tag-row">' + tag(due, due === '新词' ? 'gold' : (due === '复习' ? 'jade' : 'line')) + (w.tags || []).slice(0, 2).map(function (t) { return tag(t, 'line'); }).join('') + '</div>' +
       '<div class="word">' + h(w.w) + '</div><div class="ph">' + h(w.ph) + ' <span class="pos">' + h(w.pos) + '</span></div>' +
       '<div class="hint-zone"><span>点击卡片翻面 · 空格键</span><span>' + (d.idx + 1) + ' / ' + d.words.length + '</span></div></div>' +
       '<div class="face back"><div class="tag-row">' + tag('释义', 'jade') + '<button class="speak-btn" data-act="speak-word" data-w="' + h(w.w) + '" title="朗读" style="margin-left:auto">' + icon('i-volume') + '</button></div>' +
@@ -4774,8 +4797,16 @@ window.SEED_ERRORS = [
         a.classList.toggle('flipped', ui.deck.flipped);
         break;
       case 'rate': rateWord(a.getAttribute('data-r')); break;
-      case 'new-deck':
-        ui.deck = newDeck(); render(); break;
+      case 'new-deck': {
+        var prevKey = (ui.deck && ui.deck.words) ? ui.deck.words.map(function (w) { return w.id; }).join('|') : '';
+        ui.deck = newDeck();
+        render();
+        var nowKey = ui.deck.words.map(function (w) { return w.id; }).join('|');
+        if (!ui.deck.words.length) toast('词库已经复习完一轮了，稍后再来', true);
+        else if (nowKey === prevKey) toast('已重排队列 · ' + ui.deck.words.length + ' 词');
+        else toast('第 ' + ui.deck.round + ' 组 · ' + ui.deck.words.length + ' 个词');
+        break;
+      }
       case 'word-jump':
         if (!ui.deck) break;
         ui.deck.idx = +a.getAttribute('data-i'); ui.deck.flipped = false; render(); break;
@@ -4977,6 +5008,7 @@ window.SEED_ERRORS = [
 
   function resetUI() {
     ui.deck = null; ui.sentId = null; ui.customSentence = null; ui.listenId = null;
+    deckSeen = [];
     ui.listenZh = false; ui.listenIdx = -1; ui.trId = null; ui.trResult = null;
     ui.essayPrompt = null; ui.essayResult = null; ui.essayDraft = ''; ui.reviewFilter = 'active';
     ui.reviewTag = ''; ui.kbDocId = null; ui.kbQuery = ''; ui.chatLog = []; ui.chatBusy = false;
