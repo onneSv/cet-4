@@ -1923,10 +1923,11 @@ window.SEED_ERRORS = [
         correct: 0
       },
       srs: {},
-      errors: (window.SEED_ERRORS || []).map(function (e) { return Object.assign({}, e); }),
+      errors: (window.SEED_ERRORS || []).map(function (e) { return Object.assign({ seed: true }, e); }),
       events: [],
       chat: [],
       plan: { date: null, tasks: [] },
+      flags: { demo: true },
       settings: {
         llm: Object.assign({}, LLM_DEFAULT),
         motion: true
@@ -1952,6 +1953,20 @@ window.SEED_ERRORS = [
   if (!Array.isArray(state.chat)) state.chat = [];
   if (!state.plan) state.plan = { date: null, tasks: [] };
 
+  /* 示例数据标记：老存档里的 7 条种子错题没有 seed 字段，按 id 回填，
+     保证已有用户也能看到「这是示例」的提示并一键清空。 */
+  if (!state.flags || typeof state.flags.demo !== 'boolean') {
+    state.flags = Object.assign({ demo: true }, state.flags || {});
+  }
+  (function markSeed() {
+    var ids = {};
+    (window.SEED_ERRORS || []).forEach(function (e) { ids[e.id] = 1; });
+    (state.errors || []).forEach(function (e) {
+      if (!e) return;
+      if (typeof e.seed !== 'boolean') e.seed = !!ids[e.id];
+    });
+  })();
+
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* 隐私模式忽略 */ }
     return state;
@@ -1965,6 +1980,33 @@ window.SEED_ERRORS = [
   function reset() {
     state = defaultState();
     try { localStorage.removeItem(KEY); } catch (e) {}
+    save();
+    return state;
+  }
+
+  /* 示例数据开关
+     demo = true ：首次进入时展示内置样本（7 条示例错题 + 3 次模考历史），
+                   避免新访客打开就是空白，方便演示。
+     demo = false：只保留访客自己作答产生的记录，示例错题与预置模考一并隐藏。
+     注意：示例数据只写进各自浏览器的 localStorage，不上传任何服务器，
+     所以不同电脑看到的是同一份「内置样本」，不是别人的真实记录。 */
+  function isDemo() { return !!(state.flags && state.flags.demo); }
+  function seedErrorCount() {
+    return (state.errors || []).filter(function (e) { return e && e.seed; }).length;
+  }
+  function clearDemo() {
+    state.errors = (state.errors || []).filter(function (e) { return e && !e.seed; });
+    state.flags.demo = false;
+    save();
+    return state;
+  }
+  function restoreDemo() {
+    var exist = {};
+    (state.errors || []).forEach(function (e) { if (e) exist[e.id] = 1; });
+    (window.SEED_ERRORS || []).forEach(function (e) {
+      if (!exist[e.id]) state.errors.push(Object.assign({ seed: true }, e));
+    });
+    state.flags.demo = true;
     save();
     return state;
   }
@@ -2862,13 +2904,19 @@ window.SEED_ERRORS = [
 
     // 7. 模拟卷
     else if (intent === 'mock') {
-      done(plan.steps[0], '最近一次 ' + (window.MOCK.history.slice(-1)[0] || {}).total + ' 分');
-      var a = analyzeMock();
-      done(plan.steps[1], '总分 ' + a.total + ' / 710（四级口径），得分率 ' + a.rate + '%');
-      done(plan.steps[2], '最弱：' + a.weakest.name + '（' + a.weakest.rate + '%），差目标 ' + a.gap + ' 分');
-      blocks.push({ type: 'text', text: '最近一次 **' + a.total + ' / 710**，离目标 ' + a.target + ' 还差 **' + a.gap + ' 分**。失分最重的是 ' + a.weakest.name + '（丢 ' + a.weakest.lost + ' 分）。' });
-      blocks.push({ type: 'mock', analysis: a });
-      blocks.push({ type: 'plan', plan: buildPlan(1) });
+      if (!state.flags || state.flags.demo === false) {
+        done(plan.steps[0], '暂无真实模考记录');
+        blocks.push({ type: 'text', text: '还没有你的模考记录。示例数据已清空，我不会拿预置的分数当你的成绩。做完一套真题后，把写作 / 听力 / 阅读 / 翻译四个分项的分数告诉我，我按 710 分制拆开分析，找出最该补的那一块。' });
+        blocks.push({ type: 'plan', plan: buildPlan(1) });
+      } else {
+        done(plan.steps[0], '最近一次 ' + (window.MOCK.history.slice(-1)[0] || {}).total + ' 分（示例）');
+        var a = analyzeMock();
+        done(plan.steps[1], '总分 ' + a.total + ' / 710（四级口径），得分率 ' + a.rate + '%');
+        done(plan.steps[2], '最弱：' + a.weakest.name + '（' + a.weakest.rate + '%），差目标 ' + a.gap + ' 分');
+        blocks.push({ type: 'text', text: '最近一次 **' + a.total + ' / 710**，离目标 ' + a.target + ' 还差 **' + a.gap + ' 分**。失分最重的是 ' + a.weakest.name + '（丢 ' + a.weakest.lost + ' 分）。\n\n> 这份成绩来自内置示例数据，不是你的真实记录。' });
+        blocks.push({ type: 'mock', analysis: a });
+        blocks.push({ type: 'plan', plan: buildPlan(1) });
+      }
     }
 
     // 8. 练习
@@ -2931,6 +2979,10 @@ window.SEED_ERRORS = [
     get state() { return state; },
     save: save,
     reset: reset,
+    isDemo: isDemo,
+    seedErrorCount: seedErrorCount,
+    clearDemo: clearDemo,
+    restoreDemo: restoreDemo,
     today: today,
     addDays: addDays,
     daysBetween: daysBetween,
@@ -3618,7 +3670,8 @@ window.SEED_ERRORS = [
     var hour = new Date().getHours();
     var greet = hour < 6 ? '夜深了' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
     var focus = weak[0] ? weak[0].tag : '词汇搭配';
-    var mock = (window.MOCK.history || []).slice(-1)[0] || { total: 0 };
+    var mock = (E.isDemo() && window.MOCK && window.MOCK.history && window.MOCK.history.length)
+      ? window.MOCK.history.slice(-1)[0] : { total: 0 };
 
     var taskRows = plan.tasks.map(function (t) {
       return '<div class="task-item ' + (t.done ? 'done' : '') + '" data-act="task-go" data-route="' + h(t.route || 'practice') + '" style="cursor:pointer">' +
@@ -3663,7 +3716,7 @@ window.SEED_ERRORS = [
       '</div></div>' +
 
       '<div class="kpi-grid mt16">' +
-      '<div class="kpi"><div class="k-label">' + icon('i-target') + '最近模考</div><div class="k-val">' + mock.total + '<small>/ 710</small></div><div class="k-foot">目标 ' + S.profile.target + ' · 还差 ' + Math.max(0, S.profile.target - mock.total) + ' 分</div></div>' +
+      '<div class="kpi"><div class="k-label">' + icon('i-target') + '最近模考' + (E.isDemo() ? ' <span class="tiny muted">示例</span>' : '') + '</div><div class="k-val">' + (mock.total || '—') + '<small>/ 710</small></div><div class="k-foot">' + (mock.total ? '目标 ' + S.profile.target + ' · 还差 ' + Math.max(0, S.profile.target - mock.total) + ' 分' : '还没有模考记录') + '</div></div>' +
       '<div class="kpi"><div class="k-label">' + icon('i-flame') + '连续学习</div><div class="k-val">' + st.streak + '<small>天</small></div><div class="k-foot">今日任务 ' + doneN + '/' + plan.tasks.length + ' 已完成</div></div>' +
       '<div class="kpi"><div class="k-label">' + icon('i-book') + '到期单词</div><div class="k-val">' + st.due + '<small>个</small></div><div class="k-foot">词库已学 ' + st.learned + ' / ' + st.totalWords + '</div></div>' +
       '<div class="kpi"><div class="k-label">' + icon('i-alert') + '未掌握错题</div><div class="k-val">' + st.errors + '<small>道</small></div><div class="k-foot">已攻克 ' + st.mastered + ' 道 · 正确率 ' + (st.answered ? st.accuracy + '%' : '—') + '</div></div>' +
@@ -4300,6 +4353,14 @@ window.SEED_ERRORS = [
   }
 
   /* ---------------- 错题复盘 ---------------- */
+  /* 示例数据提示条：明确告诉访客这些记录是内置样本，并提供一键切换 */
+  function demoBanner(text, actLabel, act) {
+    return '<div class="note gold mt12" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<span class="tag-row" style="flex:none">' + tag('示例数据', 'gold') + '</span>' +
+      '<div class="small" style="flex:1;min-width:200px">' + h(text) + '</div>' +
+      '<button class="btn xs ghost" data-act="' + act + '">' + h(actLabel) + '</button></div>';
+  }
+
   function pageReview() {
     var st = E.errorStats();
     if (!ui.reviewFilter) ui.reviewFilter = 'active';
@@ -4320,6 +4381,7 @@ window.SEED_ERRORS = [
     return '<div class="page">' +
       pageHead('错题复盘', '错题本由每一次作答自动写入：选错即入库，标记掌握后仍保留证据。Agent 按标签归因，再生成变式题。',
         btn('生成变式练习', { act: 'practice-weak', cls: 'primary', icon: 'i-spark' }) + btn('让 Agent 复盘', { act: 'ask-agent', text: '帮我复盘错题，找出共同原因', cls: 'ghost' })) +
+      (E.isDemo() && E.seedErrorCount() ? demoBanner('这 ' + E.seedErrorCount() + ' 条错题是页面内置的演示样本，不是你的真实作答记录。记录只保存在当前浏览器本地，不会上传服务器，也不会出现在别人的电脑上。', '清空示例，开始记录我的错题', 'clear-demo') : '') +
       '<div class="filter-bar">' + filters + '<span class="sep"></span>' + tags + '</div>' +
       (list.length ? '<div>' + list.map(errCard).join('') + '</div>' :
         '<div class="empty">' + icon('i-check') + '<div class="big serif" style="font-size:18px;margin:8px 0">这个筛选下没有错题</div><div class="small muted">做一组练习，错题会自动出现在这里。</div><div class="mt16"><button class="btn primary" data-act="practice-weak">去练一组</button></div></div>') +
@@ -4327,7 +4389,7 @@ window.SEED_ERRORS = [
   }
   function errCard(e) {
     return '<div class="err-card"><div class="eh">' + typeTag(e.type) + tag(e.tag, 'line') + '<span class="src tiny muted">' + h(e.source || '练习') + '</span>' +
-      '<span class="tiny muted" style="margin-left:auto">' + h(e.date) + ' · ' + (e.mastered ? '<span class="c-jade">已掌握</span>' : '<span class="c-red">待复盘</span>') + '</span></div>' +
+      '<span class="tiny muted" style="margin-left:auto">' + (e.seed ? '<span class="c-gold">示例</span> · ' : '') + h(e.date) + ' · ' + (e.mastered ? '<span class="c-jade">已掌握</span>' : '<span class="c-red">待复盘</span>') + '</span></div>' +
       '<div class="q">' + h(e.q) + '</div>' +
       '<div class="ans-row"><div class="ans-box wrong"><span class="al">你的答案</span>' + h(e.userAnswer) + '</div><div class="ans-box right"><span class="al">正确答案</span>' + h(e.correct) + '</div></div>' +
       '<div class="explain"><b>错因</b>' + h(e.explain) + '</div>' +
@@ -4338,12 +4400,25 @@ window.SEED_ERRORS = [
 
   /* ---------------- 模拟卷 ---------------- */
   function pageMock() {
+    if (!E.isDemo()) {
+      return '<div class="page">' +
+        pageHead('模拟卷分析', '把总分拆到四个分项，定位“看起来都会、实际丢分”的位置；再按薄弱项直接生成练习。',
+          btn('让 Agent 给提分计划', { act: 'ask-agent', text: '按这次模考给我一个提分计划', cls: 'primary', icon: 'i-spark' })) +
+        '<div class="empty">' + icon('i-chart') +
+        '<div class="big serif" style="font-size:18px;margin:8px 0">没有模考记录</div>' +
+        '<div class="small muted">示例数据已清空，这里只会显示你自己的成绩。做完一套真题后，把四个分项的分数记进来就能看到趋势。</div>' +
+        '<div class="mt16 flex gap8" style="justify-content:center;flex-wrap:wrap">' +
+        '<button class="btn primary" data-act="go" data-route="practice">先练一组题</button>' +
+        '<button class="btn ghost" data-act="restore-demo">重新载入示例数据</button></div></div>' +
+        '</div>';
+    }
     var a = E.analyzeMock();
     var verdict = a.gap <= 0 ? '已达到目标分，接下来守住写作与翻译的稳定性。' : '距目标还差 ' + a.gap + ' 分。优先补 ' + a.weakest.name + '，它丢分最多。';
     var chart = mockChart(a.history, a.target);
     return '<div class="page">' +
       pageHead('模拟卷分析', '把总分拆到四个分项，定位“看起来都会、实际丢分”的位置；再按薄弱项直接生成练习。',
         btn('让 Agent 给提分计划', { act: 'ask-agent', text: '按这次模考给我一个提分计划', cls: 'primary', icon: 'i-spark' })) +
+      demoBanner('下面 3 次模考（452 → 478 → 500）和四个分项分数都是内置示例，不是你的真实成绩。数据只在当前浏览器本地。', '清空示例，只看我的记录', 'clear-demo') +
       '<div class="dash-grid"><div>' +
       '<div class="card"><div class="card-h"><div><div class="card-t">' + icon('i-chart') + '最近一次 · ' + (a.history[a.history.length - 1] || {}).date + '</div><div class="card-sub">CET-4 · 710 分制 · 目标 ' + a.target + '</div></div>' + tag('预测 ' + a.predicted, 'gold') + '</div>' +
       '<div class="card-b"><div class="flex gap20" style="align-items:flex-end;flex-wrap:wrap">' +
@@ -4477,7 +4552,7 @@ window.SEED_ERRORS = [
     var llm = S.settings.llm;
     var st = E.stats();
     return '<div class="page">' +
-      pageHead('设置与说明', '画像决定计划与目标；记忆存在浏览器本地；LLM 是可选项，不填 Key 也能完整演示。') +
+      pageHead('设置与说明', '画像决定计划与目标；记忆存在浏览器本地，不上传服务器；LLM 是可选项，不填 Key 也能完整演示。') +
       '<div class="dash-grid"><div>' +
       '<div class="card"><div class="card-h"><div class="card-t">' + icon('i-layers') + '学习画像</div><div class="card-sub">写入计划、分数目标与顶栏倒计时</div></div>' +
       '<div class="card-b"><div class="form-grid">' +
@@ -4497,7 +4572,13 @@ window.SEED_ERRORS = [
       '<div class="card-b"><div class="flex gap8" style="flex-wrap:wrap"><button class="btn sm" data-act="export-data">' + icon('i-download') + '导出 JSON</button>' +
       '<button class="btn sm ghost" data-act="open-memory">' + icon('i-layers') + '查看记忆面板</button>' +
       '<button class="btn sm ghost" data-act="reset-data" style="color:var(--red);border-color:#E5C9C2">' + icon('i-trash') + '重置所有记忆</button></div>' +
-      '<div class="tiny muted mt8">记忆结构：profile / srs / errors / events / plan / chat。刷新页面不会丢，换浏览器才需要导出。</div></div></div>' +
+      '<div class="divider"></div><div class="flex between" style="align-items:center;gap:8px;flex-wrap:wrap">' +
+      '<div><div class="small strong">示例数据</div><div class="tiny muted">' +
+      (E.isDemo() ? '当前显示 ' + E.seedErrorCount() + ' 条内置示例错题 + 3 次示例模考（452→478→500），用于演示，不是真实成绩' : '已清空，只显示你自己产生的记录') +
+      '</div></div>' +
+      (E.isDemo() ? '<button class="btn sm ghost" data-act="clear-demo">清空示例</button>' : '<button class="btn sm ghost" data-act="restore-demo">重新载入示例</button>') +
+      '</div>' +
+      '<div class="tiny muted mt8">记忆结构：profile / srs / errors / events / plan / chat。全部存在本机 localStorage，不上传服务器，因此每台电脑、每个浏览器都是独立的一份。</div></div></div>' +
       '</div><div>' +
       '<div class="card"><div class="card-h"><div class="card-t">' + icon('i-tool') + 'Agent 工具注册表</div><div class="card-sub">' + E.tools.length + ' 个工具，规划器按意图调用</div></div><div class="card-b" style="max-height:430px;overflow:auto">' +
       E.tools.map(function (t) {
@@ -4852,9 +4933,24 @@ window.SEED_ERRORS = [
         toast('已导出记忆 JSON');
         break;
       }
+      case 'clear-demo':
+        openModal('清空示例数据',
+          '<div class="note gold">这会移除 <b>' + E.seedErrorCount() + ' 条内置示例错题</b>，并隐藏预置的 3 次模考成绩（452 → 478 → 500）。</div>' +
+          '<div class="small mt12">你自己做过的题、背过的单词、排过的计划、聊过的记录<b>都不受影响</b>。</div>' +
+          '<div class="small muted mt12">清空后错题本从零开始，做错的题会自动入库。随时可以重新载入示例。</div>',
+          '<button class="btn ghost" data-act="modal-close">取消</button><button class="btn primary" data-act="confirm-clear-demo">确认清空</button>');
+        break;
+      case 'confirm-clear-demo':
+        E.clearDemo(); S = E.state; closeModal(); refreshChrome(); render();
+        toast('示例数据已清空，现在只显示你自己的记录');
+        break;
+      case 'restore-demo':
+        E.restoreDemo(); S = E.state; refreshChrome(); render();
+        toast('示例数据已重新载入');
+        break;
       case 'reset-data':
         openModal('重置所有记忆', '<div class="note red">这会删除画像、SRS 排程、错题、事件与对话历史，并恢复 7 条示例错题。操作不可撤销。</div>' +
-          '<div class="small muted mt12">建议先导出备份。</div>', '<button class="btn ghost" data-act="modal-close">取消</button><button class="btn red" data-act="confirm-reset">确认重置</button>');
+          '<div class="small muted mt12">只想清掉示例、保留自己的记录？用「清空示例」即可。建议先导出备份。</div>', '<button class="btn ghost" data-act="modal-close">取消</button><button class="btn red" data-act="confirm-reset">确认重置</button>');
         break;
       case 'confirm-reset':
         E.reset(); S = E.state; resetUI(); closeModal(); navigate('dashboard'); refreshChrome(); toast('记忆已重置'); break;
